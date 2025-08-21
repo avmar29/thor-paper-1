@@ -30,6 +30,7 @@ mypal_rainbow_fun <- colorRampPalette(rev(brewer.pal(11, "Spectral")))
 p_th <- 0.05
 lfc_th <- 0.5
 ## Load gene sets
+thor_list <- read.delim("THOR_Prioritised_Consensus_Summary_Table.txt")
 thor_kd_targets <- read.delim("THOR_Knockdown_Genes_R1-2.tsv")
 
 
@@ -1067,6 +1068,118 @@ write.xlsx(r0_results$Cholesterol_vs_Baseline,
 write.xlsx(r0_results$Stretch_vs_Baseline, 
            file = paste0("Untreated_DEA_Results.xlsx"), 
            row.names = FALSE, sheetName = "Stretch_vs_Baseline", append = TRUE)
+
+
+#### ADDITIONAL EXPERIMENTS: TNF, IFN
+
+library(tidyverse)
+library(tximport)
+library(DESeq2)
+library(khroma)
+## Load samplesheet
+sample_info <- read_csv("samplesheet_r4.csv") %>% 
+  mutate(sample = as.character(sample),
+         sample_id = paste0("X", sample),
+         Treatment = factor(Treatment))
+coldata <- data.frame(
+  files = list.files(path = "results/star_salmon/", 
+                     pattern = "quant.sf", recursive = TRUE)
+  ) %>% 
+  mutate(names = str_replace_all(files, "/.*", ""), 
+         files = paste0("results/star_salmon/", files)) %>% 
+  left_join(sample_info, by = c("names" = "sample"))
+rownames(coldata) <- coldata$sample_id
+coldata <- coldata[order(as.numeric(coldata$names)), ]
+file.exists(coldata$files)
+## Load transcript-to-gene table
+tx2gene <- read.delim("results/star_salmon/salmon_tx2gene.tsv", sep = "\t", header = FALSE)
+colnames(tx2gene) <- c("tx_id", "gene_id", "gene_name")
+gene_info <- unique(tx2gene[, -1])
+rownames(gene_info) <- gene_info$gene_id
+## Load TPM table
+ds_tpm <- read.delim("results/star_salmon/salmon.merged.gene_tpm.tsv", 
+                     sep = "\t", header = TRUE, row.names = 1)
+ds_tpm <- ds_tpm[, c("gene_name", sample_info$sample_id)]
+## Get average and sd TPM for every group
+#library(Matrix)
+ds_tpm_mat <- as.matrix(ds_tpm[, -1])
+colnames(ds_tpm_mat) <- paste(sample_info$Treatment, colnames(ds_tpm_mat), sep = "_")
+table(sample_info$Treatment)
+ds_tpm_stats <- data.frame(
+  CTR_Avg = Matrix::rowMeans(ds_tpm_mat[, sample_info$Treatment == "CTR"]),
+  CTR_SD = rowSds(ds_tpm_mat[, sample_info$Treatment == "CTR"]),
+  IFN_Avg = Matrix::rowMeans(ds_tpm_mat[, sample_info$Treatment == "IFN"]),
+  IFN_SD = rowSds(ds_tpm_mat[, sample_info$Treatment == "IFN"]), 
+  TNF_Avg = Matrix::rowMeans(ds_tpm_mat[, sample_info$Treatment == "TNF"]),
+  TNF_SD = rowSds(ds_tpm_mat[, sample_info$Treatment == "TNF"])
+  
+)
+## Gather files with gene count data
+files <- coldata$files
+names(files) <- coldata$sample_id
+## Load salmon data and make DESeq object
+txi <- tximport(files, type = "salmon", tx2gene = tx2gene)
+## DESeq2 with Combinatorial LM
+dds <- DESeqDataSetFromTximport(txi, coldata, ~ 0 + Treatment)
+## Pre-filtering
+keep <- rowSums(counts(dds)) >= 1; table(keep)
+dds <- dds[keep, ]
+## Add gene names
+rowData(dds)$gene_name <- gene_info[rownames(dds), "gene_name"]
+table(duplicated(rowData(dds)$gene_name))
+## Data transformation for visualization
+library(vsn)
+library(ggrepel)
+dds_vsd <- vst(dds, blind=FALSE)
+meanSdPlot(assay(dds_vsd))
+## Fast PCA
+dds_pca <- plotPCA(dds_vsd, intgroup = "Treatment")
+p <- dds_pca + 
+  geom_point(aes(fill = group), color = "white",
+             alpha = 1, shape = 21, size = 4) + 
+  scale_color_bright() + 
+  scale_fill_bright() + 
+  geom_text_repel(data = dds_pca$data, size = 3,
+                  aes(PC1, PC2, label = gsub("X", "", name)),
+                  color = "black") + 
+  theme_bw()
+ggsave(p, filename = "deseq2_vsn_pca.pdf", width = 4.5, height = 4)
+## Perform DESeq analysis and get DEA results 
+# Using combinatorial model
+dds <- DESeq(dds)
+## Find DEGs
+resultsNames(dds)
+res_comb <- list()
+# 1) Interferon vs Control 
+res_comb$IFNvsCTR <- results(dds, contrast = c("Treatment", "IFN", "CTR"))
+summary(res_comb$IFNvsCTR)
+# 2) TNF vs Control 
+res_comb$TNFvsCTR <- results(dds, contrast = c("Treatment", "TNF", "CTR"))
+summary(res_comb$TNFvsCTR)
+# 3) IFN vs TNF
+res_comb$IFNvsTNF <- results(dds, contrast = c("Treatment", "IFN", "TNF"))
+summary(res_comb$IFNvsTNF)
+## Convert DEA results to data frame, reorder columns
+res_df <- imap(res_comb, ~ {
+  # get group names
+  group_names <- unlist(strsplit(.y, split = "vs"))
+  # convert to df and re-arrange
+  tmp <- as.data.frame(.x) %>% 
+    arrange(-log2FoldChange) %>% 
+    rownames_to_column(var = "ensembl_id") %>% 
+    mutate(gene_name = gene_info[ensembl_id, "gene_name"], 
+           mlog10pvalue = -log10(pvalue),
+           mlog10padj = -log10(padj)) %>% 
+    select(ensembl_id, gene_name, log2FoldChange, lfcSE, padj, pvalue, stat, baseMean)
+  # add TPM stats
+  tmp <- cbind(tmp, ds_tpm_stats[tmp$ensembl_id, paste(rep(group_names, each = 2), c("Avg", "SD"), sep = "_")])
+  # add TPM raw values
+  tmp_tpm <- ds_tpm_mat[tmp$ensembl_id, sample_info$Treatment %in% group_names]
+  tmp_tpm <- tmp_tpm[tmp$ensembl_id, order(colnames(tmp_tpm), decreasing = TRUE)]
+  return(cbind(tmp, tmp_tpm))
+})
+## Save DEG tables list to Excel file
+writexl::write_xlsx(res_df, path = "THOR_R4_DESeq2_Results.xlsx")
 
 
 #### COMBINE SEQUENCING BATCHES ####

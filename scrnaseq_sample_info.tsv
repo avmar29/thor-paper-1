@@ -1,0 +1,18 @@
+dataset_name	dataset_gse	sample_id	bioproject	sra_run_id	cr_aggr_suffix	artery_type	artery_name	tissue_type	group	grpoup_short	inner_sample_id	inner_patient_id	inner_rep	gender	age	smoker	diabetes	dyslipidemia	symptomatic	aha_class	others
+Alsaigh_2020	GSE159677	GSM4837523	PRJNA670178	SRR13176241,SRR13176242,SRR13176243,SRR13176244	1	carotid	carotid artery	atherosclerotic core	Carotid Plaque	CAP	Patient 1 AC	Patient 1	1		82	yes	yes	yes	no	VII	
+Alsaigh_2020	GSE159677	GSM4837524	PRJNA670178	SRR13176245,SRR13176246,SRR13176247,SRR13176248	2	carotid	carotid artery	proximal adjacent	Carotid Adjacent	CAAT	Patient 1 PA	Patient 1	1		82	yes	yes	yes	no	up to IV	
+Alsaigh_2020	GSE159677	GSM4837525	PRJNA670178	SRR13176249,SRR13176250,SRR13176251,SRR13176252	3	carotid	carotid artery	atherosclerotic core	Carotid Plaque	CAP	Patient 2 AC	Patient 2	1		87	no	yes	yes	no	VII	
+Alsaigh_2020	GSE159677	GSM4837526	PRJNA670178	SRR13176253,SRR13176254,SRR13176255,SRR13176256	4	carotid	carotid artery	proximal adjacent	Carotid Adjacent	CAAT	Patient 2 PA	Patient 2	1		87	no	yes	yes	no	up to IV	
+Alsaigh_2020	GSE159677	GSM4837527	PRJNA670178	SRR13176257,SRR13176258,SRR13176259,SRR13176260	5	carotid	carotid artery	atherosclerotic core	Carotid Plaque	CAP	Patient 3 AC	Patient 3	1		65	yes	no	yes	no	VII	
+Alsaigh_2020	GSE159677	GSM4837528	PRJNA670178	SRR13176261,SRR13176262,SRR13176263,SRR13176264	6	carotid	carotid artery	proximal adjacent	Carotid Adjacent	CAAT	Patient 3 PA	Patient 3	1		65	yes	no	yes	no	up to IV	
+Pan_2020	GSE155512	GSM4705591	PRJNA649968	SRR12362566	1	carotid	carotid artery	atherosclerotic lesion	Carotid Plaque	CAP	carotid_1	Patient 1	1	male	83				yes		
+Pan_2020	GSE155512	GSM4705589	PRJNA649968	SRR12362564	2	carotid	carotid artery	atherosclerotic lesion	Carotid Plaque	CAP	carotid_2	Patient 2	1	male	67				no		
+Pan_2020	GSE155512	GSM4705590	PRJNA649968	SRR12362565	3	carotid	carotid artery	atherosclerotic lesion	Carotid Plaque	CAP	carotid_3	Patient 3	1	female	76				no		
+Wirka_2019	GSE131778	GSM3819856	PRJNA544957	SRR9130237	1	coronary	right coronary artery	atherosclerotic lesion	Coronary Plaque	RCAP	rca1-1	rca1	1	male	65	no	yes		yes		ischemic cardiomyopathy
+Wirka_2019	GSE131778	GSM3819857	PRJNA544957	SRR9130238	2	coronary	right coronary artery	atherosclerotic lesion	Coronary Plaque	RCAP	rca1-2	rca1	2	male	65	no	yes		yes		ischemic cardiomyopathy
+Wirka_2019	GSE131778	GSM3819858	PRJNA544957	SRR9130239,SRR9130240,SRR9130241	3	coronary	right coronary artery	atherosclerotic lesion	Coronary Plaque	RCAP	rca2-1	rca2	1	male	54				yes		non-ischemic cardiomyopathy
+Wirka_2019	GSE131778	GSM3819859	PRJNA544957	SRR9130242,SRR9130243,SRR9130244	4	coronary	right coronary artery	atherosclerotic lesion	Coronary Plaque	RCAP	rca2-2	rca2	2	male	54				yes		non-ischemic cardiomyopathy
+Wirka_2019	GSE131778	GSM3819860	PRJNA544957	SRR9130245,SRR9130246,SRR9130247	5	coronary	right coronary artery	atherosclerotic lesion	Coronary Plaque	RCAP	rca3-1	rca3	1	male	65				yes		FH
+Wirka_2019	GSE131778	GSM3819861	PRJNA544957	SRR9130248,SRR9130249,SRR9130250	6	coronary	right coronary artery	atherosclerotic lesion	Coronary Plaque	RCAP	rca3-2	rca3	2	male	65				yes		FH
+Wirka_2019	GSE131778	GSM3819862	PRJNA544957	SRR9130251,SRR9130252,SRR9130253	7	coronary	right coronary artery	atherosclerotic lesion	Coronary Plaque	RCAP	rca3-3	rca3	3	male	65				yes		FH
+Wirka_2019	GSE131778	GSM3819863	PRJNA544957	SRR9130254	8	coronary	right coronary artery	atherosclerotic lesion	Coronary Plaque	RCAP	rca4-1	rca4	1	female	58				yes		dextrocardia

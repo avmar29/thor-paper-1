@@ -11,9 +11,18 @@ This repository contains the code and additional files for the THOR project manu
 - *1-3_athero-scrnaseq-annotation.ipynb* - Cell type annotation of scRNA-seq dataset using popV algorithm.
 
 - *2-1_bulk-rnaseq-preprocessing.md* - Markdown file describing preprocessing steps of bulk RNA-seq data on HPC (from FASTQ files to count matrices).
+
 - *2-2_bulk-rnaseq-analysis.R* - R script file containing the code for bulk RNA-seq data analysis and integration.
 
+- *2-3_bulk-rnaseq-regulon-enrichment.R* - R script file containing the code for TF motif enrichment analysis.
+
+- *2-4_bulk-rnaseq-gcn-analysis.R* - R script file containing the code for building and exploring a gene co-expression network based on control samples in bulk RNA-seq data.
+
+- *2-5_bulk-rnaseq-celltype-deconvolution.R* - R script file containing the code for cell type deconvolution of bulk RNA-seq samples using the integrated scRNA-seq dataset as reference.
+
 - *deg_functions.R* - R script file containing helper functions for bulk RNA-seq data analysis.
+
+- *scrnaseq_sample_info.tsv* - information about publicly available scRNA-seq data on human atherosclerosis (2021-2024).
 
 - *THOR_Knockdown_Genes_R1-2.tsv* - text fie containing information about THOR target genes.
 

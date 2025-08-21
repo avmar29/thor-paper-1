@@ -66,9 +66,47 @@ set.seed(1)
 
 ```
 
-```{r data_load, message=FALSE, warning=FALSE, include=FALSE, paged.print=FALSE}
+```{r data_prepare, include=FALSE}
+## Load packages
+library(Seurat)
+library(tidyverse)
+library(Matrix)
+library(gdata)
+library(patchwork)
+sc_paths <- list(
+  alsaigh = list.dirs("raw/cellranger_counts/Alsaigh_GSE159677", recursive = FALSE), 
+  pan = list.dirs("raw/cellranger_counts/Pan_GSE155512", recursive = FALSE),
+  wirka = list.dirs("raw/cellranger_counts/Wirka_GSE131778", recursive = FALSE)
+  )
+sc_samples <- list(alsaigh = list.files("raw/cellranger_counts/Alsaigh_GSE159677"),
+                pan = list.files("raw/cellranger_counts/Pan_GSE155512"),
+                wirka = list.files("raw/cellranger_counts/Wirka_GSE131778"))
+sc_samples <- sc_paths %>% map(~ gsub(".+/GSM", "GSM", .x))
+## Load samples info
+sample_info <- read.delim("scrnaseq_sample_info.tsv")
+rownames(sample_info) <- sample_info$sample_id
+## Create Seurat objects
+sc_data <- list()
+for(i in 1:length(sc_paths)){
+  my_ds <- sc_paths[[i]]
+  sc_data[[i]] <- lapply(sc_paths[[i]], function(my_path){
+    my_sample <- gsub(".+/GSM", "GSM", my_path)
+    my_data <- Read10X(my_path)
+    my_seurat <- CreateSeuratObject(counts = my_data, min.cells = 3, min.features = 200, project = names(sc_paths)[i])
+    my_seurat$sample_id <- my_sample
+    my_seurat <- RenameCells(my_seurat, add.cell.id = my_sample)
+    return(my_seurat)
+  }); names(sc_data[[i]]) <- sc_samples[[i]]
+}; rm(i, my_ds)
+names(sc_data) <- names(sc_paths)
+## Save environment
+save("sc_athero_1.RData")
+
+```
+
+```{r data_load, include=FALSE}
 ## Load already pre-loaded datasets
-load("../sc_athero/sc_athero_1.RData")
+load("sc_athero_1.RData")
 athero_list <- list(alsaigh = seurat_alsaigh, 
                     pan = seurat_pan, 
                     wirka = seurat_wirka)

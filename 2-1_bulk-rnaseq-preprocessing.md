@@ -22,7 +22,38 @@ nf-core/rnaseq
 
 ```
 
-## Sequencing batch 1 (234 samples)
+## Baseline experiments: effects of cholesterol loading and stretch
+
+
+```bash
+
+# Check that all files exist
+while IFS="," read -r col1 col2 col3 col4
+do
+    echo "$col1"
+        if test -f "$col2"; then
+            echo "EXISTS: $col2"
+        fi
+        if test -f "$col3"; then
+            echo "EXISTS: $col3"
+        fi
+done < <(tail -n +2 samplesheet.csv)
+# Run nf-core/rnaseq pipeline
+cd /faststorage/project/THOR/anton/rna-seq/thor_kd_zero
+nextflow run /faststorage/project/THOR/rna-seq/nf-core-rnaseq-3.5/workflow \
+--input samplesheet.csv \
+--aligner star_salmon \
+--gencode \
+--fasta /faststorage/project/THOR/rna-seq/reference/gencode_r39_GRCh38.p13/GRCh38.p13.genome.fa \
+--gtf /faststorage/project/THOR/rna-seq/reference/gencode_r39_GRCh38.p13/gencode.v39.annotation.gtf \
+--star_index /faststorage/project/THOR/rna-seq/reference/gencode_r39_GRCh38.p13/index/star \
+--salmon_index /faststorage/project/THOR/rna-seq/reference/gencode_r39_GRCh38.p13/index/salmon \
+--rseqc_modules 'bam_stat,inner_distance,infer_experiment,junction_annotation,junction_saturation,read_distribution,read_duplication' \
+-profile singularity
+
+```
+
+## THOR KD Sequencing batch 1 (234 samples)
 
 ```bash
 
@@ -52,7 +83,7 @@ nextflow run /faststorage/project/THOR/rna-seq/nf-core-rnaseq-3.5/workflow \
 
 ```
 
-## Sequencing batch 2 (99 samples)
+## THOR KD Sequencing batch 2 (99 samples)
 
 ```bash
 
@@ -82,7 +113,7 @@ nextflow run /faststorage/project/THOR/rna-seq/nf-core-rnaseq-3.5/workflow \
 
 ```
 
-## Sequencing batch 3 (replication of several experiments with target gene knockdown)
+## THOR KD Sequencing batch 3 (replication of several experiments with target gene knockdown)
 
 ```bash
 
@@ -112,11 +143,13 @@ nextflow run /faststorage/project/THOR/rna-seq/nf-core-rnaseq-3.5/workflow \
 
 ```
 
-## Baseline experiments: effects of cholesterol loading and stretch
+## Additional experiments: effects of TNFa and IFNa
 
 
 ```bash
 
+## THOR Round 4 - additional TNFa and IFN effects 
+cd /faststorage/project/THOR/anton/rna-seq/thor_r4
 # Check that all files exist
 while IFS="," read -r col1 col2 col3 col4
 do
@@ -127,18 +160,18 @@ do
         if test -f "$col3"; then
             echo "EXISTS: $col3"
         fi
-done < <(tail -n +2 samplesheet.csv)
+done < <(tail -n +2 samplesheet_r4.csv)
 # Run nf-core/rnaseq pipeline
-cd /faststorage/project/THOR/anton/rna-seq/thor_kd_zero
-nextflow run /faststorage/project/THOR/rna-seq/nf-core-rnaseq-3.5/workflow \
---input samplesheet.csv \
+# nf-core/rnaseq v3.5
+nextflow run /faststorage/project/THOR/tools/nf-core-rnaseq-3.5/workflow \
+--input samplesheet_r4.csv \
 --aligner star_salmon \
+--star_index /faststorage/project/THOR/anton/rna-seq/thor_r4/results/genome/index/star \
 --gencode \
 --fasta /faststorage/project/THOR/rna-seq/reference/gencode_r39_GRCh38.p13/GRCh38.p13.genome.fa \
 --gtf /faststorage/project/THOR/rna-seq/reference/gencode_r39_GRCh38.p13/gencode.v39.annotation.gtf \
---star_index /faststorage/project/THOR/rna-seq/reference/gencode_r39_GRCh38.p13/index/star \
---salmon_index /faststorage/project/THOR/rna-seq/reference/gencode_r39_GRCh38.p13/index/salmon \
---rseqc_modules 'bam_stat,inner_distance,infer_experiment,junction_annotation,junction_saturation,read_distribution,read_duplication' \
--profile singularity
+--rseqc_modules 'bam_stat,infer_experiment,junction_annotation,junction_saturation,read_distribution,read_duplication' \
+-profile singularity \
+-resume
 
 ```
