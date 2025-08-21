@@ -1,0 +1,1590 @@
+---
+title: "Integrated single-cell analysis of human atherosclerotic lesion"
+author: "Anton Markov"
+date: "`r Sys.Date()`"
+output: 
+  html_notebook:
+    toc: true
+    toc_float: true
+    toc_collapsed: true
+    toc_depth: 3
+    number_sections: false
+    theme: united
+---
+
+# Short description
+
+This report shows the re-analysis workflow of publicly available scRNA-seq data
+collected from the cells of human atherosclerotic lesion or adjacent artery tissue.
+
+
+# Data sources
+
+| Authors           | Year | Sample details  | Number of samples | Sample groups                                                                                                               | GSE ID    | Publication                               |
+| ----------------- | ---- | --------------- | ----------------- | --------------------------------------------------------------------------------------------------------------------------- | --------- | ----------------------------------------- |
+| Alsaigh T. et al. | 2020 | carotid artery  | 6                 | Patient-matched calcified atherosclerotic plaques (n=3), and proximal adjacent tissues (n=3)                                | GSE159677 | https://pubmed.ncbi.nlm.nih.gov/36224302/ |
+| Pan H. et al.     | 2020 | carotid artery  | 3                 | Atherosclerotic carotid arteries from patients undergoing endarterectomy (n=3)                                              | GSE155512 | https://pubmed.ncbi.nlm.nih.gov/32962412/ |
+| Wirka R.C. et al. | 2019 | coronary artery | 8                 | Atherosclerotic coronary arteries from explanted hearts of patients undergoing heart transplantation (n=4), with replicates | GSE131778 | https://pubmed.ncbi.nlm.nih.gov/31359001/ |
+
+
+```{r preconfig, message=FALSE, warning=FALSE, include=FALSE, paged.print=FALSE}
+## Load packages
+library(SingleCellExperiment)
+library(Seurat)
+library(scCustomize)
+library(SoupX)
+library(DoubletFinder)
+library(scDblFinder)
+library(scrubletR)
+library(gridExtra)
+library(patchwork)
+library(tidyverse)
+library(janitor)
+library(Matrix)
+library(matrixStats)
+library(gdata)
+library(patchwork)
+# color packages
+library(RColorBrewer)
+library(MetBrewer)
+library(khroma)
+library(DT)
+#load("tmp_1.RData")
+## Set colors
+## Set palettes
+mypal_brsp <- rev(brewer.pal(11, "Spectral"))
+my_palette_func <- colorRampPalette(mypal_brsp)
+spectral_col <- scale_colour_gradientn(colours = my_palette_func(100))
+mypal_r12 <- met.brewer("Renoir", n = 12)
+mypal_brs1 <- brewer.pal(9, "Set1")
+mypal_brs2 <- brewer.pal(8, "Set2")
+mypal_brs3 <- brewer.pal(12, "Set3")
+mypal_brbupu <- brewer.pal(9, "BuPu")
+mypal_brbb <- brewer.pal(12, "Paired")
+mypal_brbyr <- rev(brewer.pal(11, "RdYlBu"))
+set.seed(1)
+
+```
+
+```{r data_load, message=FALSE, warning=FALSE, include=FALSE, paged.print=FALSE}
+## Load already pre-loaded datasets
+load("../sc_athero/sc_athero_1.RData")
+athero_list <- list(alsaigh = seurat_alsaigh, 
+                    pan = seurat_pan, 
+                    wirka = seurat_wirka)
+rm(seurat_alsaigh, seurat_pan, seurat_wirka)
+gc()
+## Simple merging
+athero_merge <- Merge_Seurat_List(athero_list)
+athero_merge$geo_id <- athero_merge$sample_id
+athero_merge$sample_id <- paste(toupper(substr(athero_merge$orig.ident, 1, 1)), 
+                                athero_merge$sample_id, sep = ".")
+#rm(seurat_alsaigh, seurat_pan, seurat_wirka)
+#gc(verbose = FALSE)
+## Add QC info
+# MT genes
+athero_merge <- PercentageFeatureSet(athero_merge, "^MT-", col.name = "percent_mito")
+# Ribosomal genes
+athero_merge <- PercentageFeatureSet(athero_merge, "^RP[SL]", col.name = "percent_ribo")
+# MRR
+athero_merge$mito_ribo_ratio <- athero_merge$percent_mito / (athero_merge$percent_mito + athero_merge$percent_ribo)
+# Hemoglobin genes
+athero_merge <- PercentageFeatureSet(athero_merge, "^HB[^(P)]", col.name = "percent_hb")
+# MALAT1 percentage in total expression of each cell (as a marker of ambient RNA)
+athero_merge <- PercentageFeatureSet(athero_merge, "^MALAT1", col.name = "percent_malat1")
+# Library complexity
+athero_merge$novelty_score <- log10(athero_merge$nFeature_RNA) / log10(athero_merge$nCount_RNA)
+## Get metadata
+athero_merge_md <- athero_merge@meta.data %>% 
+  left_join(sample_info, by = join_by(geo_id == sample_id))
+
+```
+
+# Data analysis
+
+Analysis using `Seurat` (version `r Version(athero_merge)`).
+
+## Sample (library) information
+
+Clinical characteristics of samples and patients
+
+```{r sample_table_1, echo=FALSE, message=FALSE, warning=FALSE, paged.print=TRUE}
+athero_merge_md %>% 
+  mutate(source_name = toupper(orig.ident)) %>% 
+  select(sample_id, source_name, geo_id, group, inner_patient_id, inner_sample_id, gender, age, smoker, 
+         diabetes, dyslipidemia, symptomatic, aha_class) %>% 
+  distinct_all() %>% 
+  as.data.frame()
+
+```
+
+Technical characteristics of DNA libraries pooled by sample while 
+processing via CellRanger
+
+```{r sample_table_2, echo=FALSE, message=FALSE, warning=FALSE, paged.print=TRUE}
+athero_merge_md %>% 
+  mutate(source_name = toupper(orig.ident)) %>% 
+  group_by(sample_id, source_name, inner_sample_id) %>% 
+  summarise("N_Cells" = n(), 
+            "N_Genes(min)" = min(nFeature_RNA), "N_Genes(max)" = max(nFeature_RNA),
+            "N_UMIs(min)" = min(nCount_RNA), "N_UMIs(max)" = max(nCount_RNA)) %>% 
+  as.data.frame()
+
+```
+
+
+## Initial QC metrics estimation
+
+-   Number of genes detected per cell (`nFeature_RNA`)
+-   Number of gene counts per cell (`nCount_RNA`)
+-   Fraction (percent) of the most expressed gene (`percent_largest_gene`)
+-   Fraction (percent) of mitochondrial genes (`percent_mito`)
+-   Fraction (percent) of ribosomal protein genes (`percent_ribo`)
+-   Fraction (percent) of haemoglobin genes (`percent_hb`)
+-   Fraction (percent) of Malat1 - high levels can point to ambient RNA contamination (`percent_malat1`)
+-   Estimate of transcriptome complexity in each cell, a ratio of nGenes over nUMIs (`novelty_score`)
+
+```{r qc_plots, echo=FALSE, fig.height=8, fig.width=9, message=FALSE, warning=FALSE}
+feats <- c("nFeature_RNA", "nCount_RNA", "percent_mito", "percent_ribo", 
+           "mito_ribo_ratio", "percent_malat1", "novelty_score", "percent_hb")
+VlnPlot(athero_merge, group.by = "sample_id", 
+        features = feats, pt.size = 0.1, ncol = 2, combine = TRUE) + 
+  NoLegend() + labs(x = NULL) + plot_annotation("Violin plot")
+RidgePlot(athero_merge, group.by = "sample_id", features = feats, ncol = 3) + 
+  plot_annotation("Ridge plot")
+
+```
+
+*Mito-ribo ratio (MRR)* is rather useful estimation of cell quality.
+Barcodes with higher MRR (more mitochondrial and less ribosomal genes expressed) 
+usually appear to be diying or apoptotic cells, or cell debris.
+
+```{r qc_mrr, echo=FALSE, fig.height=4.5, fig.width=6, message=FALSE, warning=FALSE}
+th_mrr <- 0.5
+th_nfl <- 400
+th_nfh <- 4000
+th_ns <- 0.8
+sample_ids <- unique(athero_merge$sample_id)
+athero_merge_md %>% 
+  ggplot(aes(x = nFeature_RNA, y = mito_ribo_ratio, color = percent_mito)) + 
+  geom_point(size = 0.1) + 
+  scale_color_viridis_c() + 
+  geom_hline(yintercept = th_mrr, linetype = "dashed", color = "red") + 
+  geom_vline(xintercept = th_nfl, linetype = "dashed", color = "red") + 
+  geom_vline(xintercept = th_nfh, linetype = "dashed", color = "red") + 
+  labs(x = "Number of detected genes", y = "MRR") + 
+  facet_wrap(~ sample_id, ncol = 5) + 
+  theme_bw() #+ 
+    #theme(legend.position = "none")
+
+```
+
+Here are dashed lines denote approximate thresholds of the relevant parameters 
+picked "by eye": 
+- nGenes = [`r th_nfl`; `r th_nfh`], 
+- MRR ≤ `r th_mrr`.
+
+
+Another useful characteristics is an estimation of DNA library complexity called 
+a *novelty score (NS)*. Sometimes one can detect contamination with low complexity 
+cell types like red blood cells via this metric. 
+Usually, it is expected to be above 0.80.
+
+```{r qc_novelty_1, echo=FALSE, fig.height=4.5, fig.width=6, message=FALSE, warning=FALSE}
+athero_merge_md %>% 
+  mutate(NS = novelty_score) %>% 
+  ggplot(aes(nCount_RNA, nFeature_RNA, color = NS)) + 
+  geom_point(size = 0.5) + 
+  scale_color_viridis_c() + 
+  facet_wrap(~ sample_id, ncol = 5) + 
+  theme_bw() + 
+  labs(x = "Number of UMIs (counts) per cell",
+       y = "Number of genes per cell",
+       title = "Novelty score (NS) helps to determine a contamination with droplets having much lower library complexity")
+
+```
+
+```{r qc_novelty_2, echo=FALSE, fig.height=2, fig.width=5, message=FALSE, warning=FALSE}
+athero_merge_md %>% 
+  mutate(NS = ifelse(novelty_score > th_ns, "Yes (NS ≥0.8)", "No (NS <0.8)")) %>% 
+  ggplot(aes(nCount_RNA, nFeature_RNA, color = NS)) + 
+  geom_point(size = 0.5) + 
+  scale_color_bright(reverse = TRUE) + 
+  facet_wrap(~ toupper(orig.ident), ncol = 5) + 
+  theme_bw() + 
+  theme(legend.title = element_blank()) + 
+  labs(x = "Number of UMIs (counts) per cell",
+       y = "Number of genes per cell",
+       title = "Is complexity of library enough?",
+       subtitle = "(Samples aggregated by source dataset)")
+
+```
+
+What are the top 10 mostly expressed gene in every sample (library)?
+
+```{r qc_top_exprs, echo=FALSE, warning=FALSE, fig.height=4, fig.width=6}
+library(matrixStats)
+ng <- 10
+sc_genes <- rownames(athero_merge)
+sc_counts <- athero_merge@assays$RNA@counts
+sc_frac <- prop.table(as.matrix(sc_counts), 2)
+#for(x in unique(sc_merged$orig.ident)) {
+#  exp_tmp <- rowSums(sc_counts[, which(sc_merged$orig.ident == x)])
+#  cat(x, ": ", paste(sc_genes[order(exp_tmp, decreasing = TRUE)][1:ng], collapse = ", "), "\n\n")
+#}
+tmp <- lapply(unique(athero_merge$sample_id), function(x) { 
+  df <- sc_frac[, which(athero_merge$sample_id == x)]
+  dfstat <- data.frame(sample = x, gene = sc_genes, 
+                       frac_mean = rowMeans(df),
+                       frac_sd = rowSds(df),
+                       frac_max = rowMaxs(df))
+  return(dfstat)
+  })
+tmp_df <- Reduce(rbind, tmp)
+rm(sc_genes, sc_frac, sc_counts, tmp)
+tmp_df %>% 
+  group_by(sample) %>% 
+  arrange(-frac_mean) %>% 
+  slice_head(n = ng) %>% 
+  ggplot(aes(frac_mean, reorder(gene, frac_mean))) + 
+  geom_bar(stat = "identity", position = position_dodge(),
+           color = "black", fill = "white") +
+  geom_errorbar(aes(xmin = frac_mean, xmax = frac_mean + frac_sd), 
+                width = 0.2, position = position_dodge(0.9)) + 
+  facet_wrap(~ sample, ncol = 5, scales = "free_y") + 
+  labs(y = "Gene", x = "Fraction of total per cell expression")
+
+```
+
+A high percentage of MALAT1 and MT genes point to both bad quality 
+(dying, apoptotic) cells or contamination by ambient RNA. 
+
+```{r qc_malat1_exprs, echo=FALSE, fig.height=2, fig.width=6, message=FALSE, warning=FALSE}
+athero_merge_md %>% 
+  ggplot(aes(nFeature_RNA, mito_ribo_ratio, color = percent_malat1)) + 
+    geom_point(size = 0.5) + 
+    scale_color_viridis_c() + 
+    facet_wrap(~ toupper(orig.ident), ncol = 5) + 
+    theme_bw() + 
+    labs(x = "Number of detected genes", y = "MRR",
+         title = "Fraction of MALAT1 counts per cell")
+
+```
+
+As we see above, MALAT1 is highly presented mostly in the cells with high MRR. 
+But also highly enriched in the cells with MRR <0.5 but with not so many (<2000) 
+genes detected per cell.
+Hence, the presence of ambient RNA is expected due to possibly abundant presence 
+of debris in atherosclerotic lesions.
+
+Let's start by correcting for any potential RNA contamination from the surroundings, 
+and afterward, we'll implement quality control filtering.
+
+
+## Correction for ambient RNA contamination
+
+The presence of cell-free mRNA contamination within the input solution 
+is commonly referred to as "the soup," 
+which originates from the process of cell lysis.
+We will check for that and correct using 
+[*SoupX package*](https://doi.org/10.1093/gigascience/giaa151).
+
+```{r soupx_run, echo=FALSE, message=FALSE, warning=FALSE, paged.print=FALSE}
+## Load packages
+library(SoupX)
+library(Matrix)
+#library(DropletUtils)
+## Make a table of CellRanger output directories
+main_dirs <- c("Alsaigh_GSE159677", "Pan_GSE155512", "Wirka_GSE131778")
+cellranger_outs <- map_dfr(main_dirs, ~ {
+  dir_list <- list.dirs(
+    path = file.path("/faststorage/project/THOR/scrna-seq/raw", 
+                     .x, "cellranger_count"), 
+    recursive = FALSE)
+  dir_df <- data.frame(
+    sample_id = gsub(".*(GSM.+)", "\\1", dir_list),
+    geo_id = unlist(strsplit(.x, split = "_"))[2],
+    author = tolower(unlist(strsplit(.x, split = "_"))[1]),
+    outs_path = dir_list
+    )
+  return(dir_df)
+}) 
+rownames(cellranger_outs) <- cellranger_outs$sample_id
+cellranger_outs <- cellranger_outs[sample_info$sample_id, ]
+## Load raw and filtered BC matrices
+# Load data and estimate soup profile with default settings
+soupx_est = soupx_adj <- list()
+for(i in 1:nrow(cellranger_outs)) {
+  # Load CellRanger output (raw and filtered gene-barcode matrices)
+  sc <- load10X(file.path(cellranger_outs$outs_path[i], "outs"), verbose = FALSE)
+  cat(cellranger_outs$sample_id[i], "is loaded... ")
+  # Automatically estimate the rate of contamination (rho)
+  sc <- autoEstCont(sc, verbose = FALSE, doPlot = FALSE)
+  soupx_est[[i]] <- sc
+  cat("ambient RNA contamination is estimated: rho = ", 
+      sc$fit$rhoEst, " (", sc$fit$rhoFWHM[1], "-", sc$fit$rhoFWHM[2], ")... ", sep = "")
+  # Adjust the data
+  sc <- adjustCounts(sc, roundToInt = TRUE, verbose = FALSE)
+  soupx_adj[[i]] <- sc
+  cat("count matrix is adjusted.\n")
+}; rm(i, sc)
+names(soupx_adj) = names(soupx_est) <- cellranger_outs$sample_id
+
+## Save SoupX results
+#saveRDS(soupx_est, "soupx_autocont_estimated.rds")
+#saveRDS(soupx_adj, "soupx_autocont_adjusted.rds")
+
+```
+
+```{r soupx_save, echo=FALSE, message=FALSE, warning=FALSE, paged.print=FALSE}
+## Save or read SoupX results
+library(SoupX)
+library(Matrix)
+#saveRDS(soupx_est, "soupx_autocont_estimated.rds")
+#saveRDS(soupx_adj, "soupx_autocont_adjusted.rds")
+soupx_est <- readRDS("soupx_autocont_estimated.rds")
+soupx_adj <- readRDS("soupx_autocont_adjusted.rds")
+
+```
+
+The top 20 genes with highest expression in background 
+(useful to pick "soup"-specific genes). 
+(These are often enriched for ribosomal proteins). 
+
+```{r soupx_bg, echo=FALSE, warning=FALSE, rows.print = 20}
+ntop <- 20
+soupx_bgtop <- imap_dfr(soupx_est, ~ {
+  .x$soupProfile %>% 
+    arrange(-est) %>% 
+    slice_head(n = ntop) %>% 
+    rownames_to_column(var = "Gene") %>% 
+    mutate(Sample = .y, Gene = Gene, 
+           Percent_soup = round(est * 100, 2),
+           Counts_soup = counts,) %>% 
+    select(Sample, Gene, Percent_soup, Counts_soup)
+})
+datatable(soupx_bgtop, options = list(pageLength = 20)) %>% 
+  formatStyle("Percent_soup", #target = "row",
+              color = styleInterval(0.99, c("black", "red")))
+
+```
+
+Automatically estimated ambient RNA total contamination rates
+
+```{r soupx_rho, echo=FALSE, fig.height=4, fig.width=6, warning=FALSE}
+soupx_rho_df <- imap_dfr(soupx_est, ~ {
+  data.frame(Sample = .y, Percent_contamination = .x$fit$rhoEst * 100)
+})
+soupx_rho_df
+
+```
+
+The top 15 genes set to zero in some fraction of cells after SoupX correction.
+
+```{r soupx_top, echo=FALSE, warning=FALSE, fig.width=7, fig.height=7}
+ntop <- 15
+soupx_top_adj <- imap_dfr(soupx_est, ~ {
+  sc <- .x
+  out <- soupx_adj[[.y]]
+  cnt0 = rowSums(sc$toc > 0)
+  cnt1 = rowSums(out > 0)
+  sel <- tail(sort((cnt0 - cnt1)/cnt0), n = ntop)
+  df <- data.frame(Sample = .y,
+                   Gene = names(sel),
+                   Percent_zeroed = sel * 100,
+                   Before = cnt0[names(sel)],
+                   After = cnt1[names(sel)])
+  return(df)
+})
+soupx_top_adj %>% 
+  pivot_longer(cols = c(Before, After), 
+               names_to = "Group", 
+               values_to = "Ncells_expressed") %>% 
+  mutate(Corrected = c(Group == "After")) %>% 
+  ggplot(aes(x = Gene, y = log10(Ncells_expressed), fill = Corrected)) + 
+  geom_bar(color = "white", position="dodge", stat="identity") + 
+  scale_fill_light() + 
+  facet_wrap(~ Sample, ncol = 3, scales = "free_x") + 
+  theme_bw() + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) + 
+  labs(title = paste0('Number of cells (log10) expressing top ', ntop, 
+                      ' "soup"-related genes before and after applying SoupX correction'),
+       x = NULL, y = NULL)
+  
+```
+
+We observe that certain genes, which have a high level of expression 
+in the 'soup,' had their expression levels either reduced to zero 
+or decreased by one or more orders of magnitude.
+
+Conversely, the impact of SoupX correction on certain marker genes 
+for the main cell types is not as dramatic.
+
+```{r soupx_markers, echo=FALSE, warning=FALSE, fig.width=7, fig.height=7}
+marker_genes <- c("ACTA2", "MYH11", "TAGLN", "RGS5",
+                  "LUM", "FN1", "DCN", "SOX9", "SPP1",
+                  "CDH5", "PECAM1", 
+                  "PTPRC", "CD3D", "CD74", "CD68")
+soupx_markers_adj <- imap_dfr(soupx_est, ~ {
+  sc <- .x
+  out <- soupx_adj[[.y]]
+  cnt0 = rowSums(sc$toc > 0)
+  cnt1 = rowSums(out > 0)
+  df <- data.frame(Sample = .y,
+                   Gene = marker_genes,
+                   Before = cnt0[marker_genes],
+                   After = cnt1[marker_genes])
+  return(df)
+})
+soupx_markers_adj %>% 
+  pivot_longer(cols = c(Before, After), 
+               names_to = "Group", 
+               values_to = "Ncells_expressed") %>% 
+  mutate(Corrected = c(Group == "After")) %>% 
+  ggplot(aes(x = Gene, y = log10(Ncells_expressed), fill = Corrected)) + 
+  geom_bar(color = "white", position="dodge", stat="identity") + 
+  scale_fill_light() + 
+  facet_wrap(~ Sample, ncol = 3, scales = "free_x") + 
+  theme_bw() + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) + 
+  labs(title = 'Number of cells (log10) expressing marker genes for main cell types before and after applying SoupX',
+       x = NULL, y = NULL)
+
+```
+
+
+```{r make_seu, include=FALSE}
+## Make a list of Seurat objects from adjusted count matrices
+## additionally remove genes that are not detected in at least 3 cells
+seu_list_raw <- imap(soupx_adj, ~ {
+  CreateSeuratObject(counts = .x, project = .y, min.cells = 3) %>% 
+    RenameCells(add.cell.id = .y)
+  })
+## Simple merging
+## Add some metadat
+seu_merge_raw <- Merge_Seurat_List(seu_list_raw)
+seu_merge_raw$geo_id <- seu_merge_raw$orig.ident
+seu_merge_raw$dataset_name <- sample_info[seu_merge_raw$geo_id, "dataset_name"]
+seu_merge_raw$sample_id <- paste(toupper(substr(seu_merge_raw$dataset_name, 1, 1)), 
+                                seu_merge_raw$geo_id, sep = ".")
+## Add QC info
+# MT genes
+seu_merge_raw <- PercentageFeatureSet(seu_merge_raw, "^MT-", col.name = "percent_mito")
+# Ribosomal genes
+seu_merge_raw <- PercentageFeatureSet(seu_merge_raw, "^RP[SL]", col.name = "percent_ribo")
+# MRR
+seu_merge_raw$mito_ribo_ratio <- seu_merge_raw$percent_mito / (seu_merge_raw$percent_mito + seu_merge_raw$percent_ribo)
+# Hemoglobin genes
+seu_merge_raw <- PercentageFeatureSet(seu_merge_raw, "^HB[^(P)]", col.name = "percent_hb")
+# MALAT1 percentage in total expression of each cell (as a marker of ambient RNA)
+seu_merge_raw <- PercentageFeatureSet(seu_merge_raw, "^MALAT1", col.name = "percent_malat1")
+# CD45 percentage in total expression of each cell (as a marker of ambient RNA)
+seu_merge_raw <- PercentageFeatureSet(seu_merge_raw, "^PTPRC", col.name = "percent_cd45")
+# Library complexity
+seu_merge_raw$novelty_score <- log10(seu_merge_raw$nFeature_RNA) / log10(seu_merge_raw$nCount_RNA)
+## Get metadata
+seu_merge_raw_md <- seu_merge_raw@meta.data %>% 
+  left_join(sample_info, by = join_by(geo_id == sample_id))
+
+```
+
+
+## Filtering low quality barcodes 
+
+There might be different "bad cells" (barcodes): 
+empty drops, fragments of cells, dead cells, etc.
+
+```{r include=FALSE}
+## Set thresholds 
+th_nfl <- 200
+th_nfh <- 4500
+th_ncl <- 500
+th_mrr <- 0.5
+th_mr <- 10
+th_hr <- 1
+th_ns <- 0.8
+
+```
+
+
+There are several parameters we can explore for cells (barcodes) quality assessment.
+
+* **Number of detected genes** (NDG, `nFeature_RNA`): 
+in the original papers, limited between 200 and 4000 genes (Alsaigh, Pan), 
+or between 500 and 3500 (Wirka). 
+Let's start with `r th_nfl` detected genes as minimum, and `r th_nfh` as maximum.
+
+* **Number of gene counts (Number of UMIs)** (NUMI, `nCount_RNA`): 
+usually limited between 500 and 50000 counts. This cutoff mentioned only in 
+Pan et al. paper, number of UMIs is up to 20'000.
+We will use only lower cutoff of `r th_ncl` UMIs and set the upper threshold 
+later not to overestimate a doublet rate further.
+
+* **Mitochondrial gene counts ratio** (MTP, `percent_mito`): 
+usually must be less than 10%. Ppers by Pan et al and Alsaigh et al use a 10% 
+cutoff. In Wirka et al study it is more stringent (< 7.5%). 
+Let's first use more relaxed 10% since we define an additional cutoff of MRR <0.5.
+
+* **Hemoglobin gene counts ratio** (HBP, `percent_hb`): 
+must be less than 1% which helps to dispose of red blood cell contamination. 
+There is almost no cells in analysed libraries with noticeable levels of HB genes.
+
+* **Complexity: novelty score** (NS, `novelty_score`): 
+recommended to be more than 0.8.
+
+
+**How many cells pass these criteria?**
+
+Let's take a look at QC metrics after SoupX correction 
+and estimate how many cells pass defined criteria.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, paged.print=FALSE, fig.width=7, fig.height=8}
+# plots wth thresholds
+p_nf <- RidgePlot(seu_merge_raw, features = "nFeature_RNA", group.by = "sample_id") + 
+  NoLegend() + lims(x = c(NA, 6000)) + 
+  geom_vline(xintercept = th_nfl, col = "red") + 
+  geom_vline(xintercept = th_nfh, col = "red") + 
+  scale_y_discrete(limits = rev) + 
+  labs(title = "Number of detected genes (NDG)", y = NULL)
+p_nc <- RidgePlot(seu_merge_raw, features = "nCount_RNA", group.by = "sample_id") + 
+  NoLegend() + lims(x = c(NA, 20000)) + 
+  geom_vline(xintercept = th_ncl, col = "red") + 
+  scale_y_discrete(limits = rev) + 
+  labs(title = "Number of UMIs (NUMI)", y = NULL)
+p_ns <- RidgePlot(seu_merge_raw, features = "novelty_score", group.by = "sample_id") + 
+  NoLegend() + 
+  geom_vline(xintercept = th_ns, col = "red") + 
+  scale_y_discrete(limits = rev) + 
+  labs(title = "Novelty score (NS)", y = NULL)
+p_hr <- RidgePlot(seu_merge_raw, features = "percent_hb", group.by = "sample_id") + 
+  NoLegend() + xlim(NA, 5) + 
+  scale_y_discrete(limits = rev) + 
+  geom_vline(xintercept = th_hr, col = "red") + 
+  labs(title = "Percent of hemoglobin gene counts per cell (HBP)", y = NULL)
+p_mr <- RidgePlot(seu_merge_raw, features = "percent_mito", group.by = "sample_id") + 
+  NoLegend() + xlim(NA, 20) + 
+  scale_y_discrete(limits = rev) + 
+  geom_vline(xintercept = th_mr, col = "red") + 
+  labs(title = "Percent of mitochondrial gene counts per cell (MTP)", y = NULL)
+p_mrr <- RidgePlot(seu_merge_raw, features = "mito_ribo_ratio", group.by = "sample_id") + 
+  NoLegend() + 
+  geom_vline(xintercept = th_mrr, col = "red") + 
+  scale_y_discrete(limits = rev) + 
+  labs(title = "Mito-ribo ratio (MRR)", y = NULL)
+(p_nf | p_nc) / (p_ns | p_hr) / (p_mr | p_mrr)
+
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, paged.print=TRUE}
+seu_merge_raw_md %>% 
+  #mutate(source = orig.ident) %>% 
+  group_by(sample_id) %>% 
+  summarise(
+    N_Cells = n(),
+    NDG = sum(nFeature_RNA >= th_nfl & nFeature_RNA <= th_nfh),
+    NUMI = sum(nCount_RNA >= th_ncl),
+    NS = sum(novelty_score >= th_ns),
+    MTP = sum(percent_mito <= th_mr),
+    MRR = sum(mito_ribo_ratio <= th_mrr),
+    HBP = sum(percent_hb <= th_hr),
+    ALL = sum(nFeature_RNA >= th_nfl & nFeature_RNA <= th_nfh & 
+                novelty_score >= th_ns & 
+                percent_mito <= th_mr & 
+                mito_ribo_ratio <= th_mrr & 
+                percent_hb <= th_hr),
+  ) %>% mutate(
+    "Passed NDG cutoff" = paste0(NDG, " (", round(NDG/N_Cells*100,1), "%)"),
+    "Passed NUMI cutoff" = paste0(NUMI, " (", round(NUMI/N_Cells*100,1), "%)"),
+    "Passed NS cutoff" = paste0(NS, " (", round(NS/N_Cells*100,1), "%)"),
+    "Passed MTP cutoff" = paste0(MTP, " (", round(MTP/N_Cells*100,1), "%)"),
+    "Passed MRR cutoff" = paste0(MRR, " (", round(MRR/N_Cells*100,1), "%)"),
+    "Passed HBP cutoff" = paste0(HBP, " (", round(HBP/N_Cells*100,1), "%)"),
+    "Passed all cutoffs" = paste0(ALL, " (", round(ALL/N_Cells*100,1), "%)")
+  ) %>% select(-c(3:8)) %>% 
+  knitr::kable()
+
+```
+
+```{r include=FALSE}
+## Filter out low-quality cells
+seu_merge_filt <- subset(
+  seu_merge_raw, 
+  nFeature_RNA >= th_nfl & nFeature_RNA <= th_nfh & 
+    nCount_RNA >= th_ncl & 
+    novelty_score >= th_ns & 
+    percent_mito <= th_mr & 
+    mito_ribo_ratio <= th_mrr & 
+    percent_hb <= th_hr
+  )
+## And do the same for every dataset apart
+seu_list_filt <- map(seu_list_raw, ~ {
+  seu <- .x[, which(Cells(.x) %in% Cells(seu_merge_filt))]
+  seu@meta.data <- seu_merge_filt@meta.data[Cells(seu),]
+  return(seu)
+})
+
+## Run shortly default Seurat pipeline
+npc <- 30
+res <- 0.5
+
+## Get the arbitary number of PCs
+#tmp <- seu_list_filt$GSM4837523 %>% 
+#  NormalizeData() %>%
+#  FindVariableFeatures() %>% 
+#  ScaleData() %>% 
+#  RunPCA(npcs = 50, verbose = FALSE)
+#ElbowPlot(tmp, ndims = 50)
+
+seu_list <- map(seu_list_filt, ~ {
+  NormalizeData(.x) %>% 
+    FindVariableFeatures() %>% 
+    ScaleData() %>% 
+    RunPCA(npcs = npc, verbose = FALSE) %>%
+    RunUMAP(reduction = "pca", dims = 1:npc, verbose = FALSE) %>%
+    FindNeighbors(reduction = "pca", dims = 1:npc, verbose = FALSE) %>%
+    FindClusters(resolution = res, verbose = FALSE)
+})
+#saveRDS(seu_list_filt, file = "athero_soupx_qcfilt.rds")
+
+```
+
+
+## Doublet/multiplet detection
+
+Doublets/multiplets are defined as two or more cells that are sequenced 
+under the same cellular barcodec. They can be formed from the same (*homotypic*)
+or different (*heterotypic*) cell types. 
+Their identification is crucial as they are most likely misclassified 
+and can lead to distorted downstream analysis steps. 
+
+To detect putative doublets, will use three R packages: 
+- [*DoubletFinder*](https://doi.org/10.1016/j.cels.2019.03.003) 
+- [*scDblFinder*](https://doi.org/10.12688/f1000research.73600.2).
+- [*Scrublet*](https://doi.org/10.1016/j.cels.2018.11.005), 
+adopted for run from R [here](https://github.com/Moonerss/scrubletR)
+
+Analysed dataets are obtained after scRNA-seq of cell suspension pre-sorted 
+by cell size and viability. They must have contain rather low percent of 
+droplets with doublet/multiplet cells.
+Doublet rate about 3% is a maximum remarked in related publications 
+(in Alsaigh et al paper). We set this rate higher, up to 8%, 
+to certainly filter out putative doublets.
+
+```{r include=FALSE}
+library(DoubletFinder)
+library(scDblFinder)
+library(scrubletR)
+## set parameters
+npc <- 30
+res <- 0.5
+dr <- 0.08   ## Assuming 8% doublet rate
+### DoubletFinder
+seu_list <- map(seu_list, ~ {
+  ## pK Identification (no ground-truth)
+  sweep.res.list <- paramSweep_v3(.x, PCs = 1:npc, sct = FALSE)
+  sweep.stats <- summarizeSweep(sweep.res.list, GT = FALSE)
+  bcmvn <- find.pK(sweep.stats)
+  ## Homotypic Doublet Proportion Estimate
+  homotypic.prop <- modelHomotypic(.x$seurat_clusters)
+  nExp_poi <- round(dr * nrow(.x@meta.data))  
+  nExp_poi.adj <- round(nExp_poi*(1-homotypic.prop))
+  ## Run DoubletFinder with varying classification stringencies 
+  seu_obj <- doubletFinder_v3(
+    .x, PCs = 1:npc, pN = 0.25, pK = 0.09, 
+    nExp = nExp_poi, reuse.pANN = FALSE, sct = FALSE
+    )
+  pann_col <- grep("pANN_", colnames(seu_obj@meta.data), value = TRUE)
+  seu_obj <- doubletFinder_v3(
+    seu_obj, PCs = 1:npc, pN = 0.25, pK = 0.09, 
+    nExp = nExp_poi.adj, reuse.pANN = pann_col, sct = FALSE
+    )
+  ## Rename the columns in metadata with DF output
+  xmd <- seu_obj@meta.data
+  colnames(xmd)[c(ncol(xmd)-2, ncol(xmd)-1, ncol(xmd))] <- c("DoubletFinder.pANN", "DoubletFinder.LC.class", "DoubletFinder.HC.class")
+  seu_obj@meta.data <- xmd
+  return(seu_obj)
+})
+
+### scDblFinder
+seu_list <- map(seu_list, function(seu) {
+  sce <- as.SingleCellExperiment(seu, assay = "RNA")
+  sce <- scDblFinder(sce, clusters = sce$seurat_clusters, dbr = dr)
+  scdbl_cols <- grep("scDblFinder", colnames(colData(sce)), value = TRUE)
+  seu@meta.data <- cbind(seu@meta.data, colData(sce)[, scdbl_cols])
+  return(seu)
+})
+
+### Scrublet
+seu_list <- map(seu_list, function(seu) {
+  res <- scrublet_R(seurat_obj = seu,
+                  python_home = "~/miniconda3/envs/r4.2/bin/python",
+                  expected_doublet_rate = dr)
+  xmd <- res@meta.data
+  colnames(xmd)[c(ncol(xmd)-1, ncol(xmd))] <- paste0("Scrublet.", colnames(xmd)[c(ncol(xmd)-1, ncol(xmd))])
+  res@meta.data <- xmd
+  return(res)
+})
+## Transfer doublet information to non-normalised data
+for(i in 1:length(seu_list)) {
+  seu_list_filt[[i]]@meta.data <- seu_list[[i]]@meta.data[Cells(seu_list_filt[[i]]), ]
+}
+## Save data
+#saveRDS(seu_list_filt, file = "athero_soupx_qcfilt_doub_nonorm_v2.rds")
+save(seu_list_filt, seu_list_norm = seu_list, file = "athero_soupx_qcfilt_doub_v2.rda")
+
+```
+
+Let's do initial merging of sample datasets to visually compare the efficiency 
+of doublet detection methods and QC.
+
+```{r include=FALSE}
+## Set PCA and clustering parameters
+npc <- 30
+res <- 0.5
+## Make a merged object
+seu_tmp <- merge(x = seu_list_filt[[1]], y = seu_list[2:length(seu_list_filt)]) %>% 
+  NormalizeData(verbose = FALSE) %>% # Perform normalisation
+  FindVariableFeatures() # Find variable features
+# Scaling the data
+seu_tmp <- ScaleData(seu_tmp, features = rownames(seu_tmp))
+# PCA and UMAP embedding
+seu_tmp <- RunPCA(seu_tmp)
+#ElbowPlot(seu_tmp, ndims = 50)
+seu_tmp <- RunUMAP(seu_tmp, dims = 1:npc)
+#seu_tmp <- RunTSNE(seu_tmp, dims = 1:npc)
+seu_tmp <- FindNeighbors(seu_tmp, dims = 1:npc)
+seu_tmp <- FindClusters(seu_tmp, resolution = res)
+## Add and fix some metadata
+seu_tmp$DoubletFinder.HC.class <- factor(seu_tmp$DoubletFinder.HC.class)
+seu_tmp$scDblFinder.class <- factor(str_to_title(seu_tmp$scDblFinder.class))
+seu_tmp$Scrublet.class <- factor(ifelse(seu_tmp$Scrublet.predicted_doublets, 
+                                        "Doublet", "Singlet"))
+seu_tmp$merged_cluster_res0.5 <- factor(paste0("C", seu_tmp$seurat_clusters),
+                                        levels = paste0("C", sort(unique(seu_tmp$seurat_clusters))))
+seu_tmp$doublet_consensus <- ifelse(
+  c((seu_tmp$DoubletFinder.HC.class == "Doublet") + (seu_tmp$scDblFinder.class == "Doublet") + 
+     (seu_tmp$Scrublet.class == "Doublet")) > 1, "Doublet", "Singlet")
+## saveRDS(seu_tmp, file = "athero_soupx_qcfilt_doub_merge.rds")
+## seu_tmp <- readRDS("athero_soupx_qcfilt_doub_merge.rds")
+## Cell cycle
+cell_cycle <- read_csv("/faststorage/project/THOR/anton/gene_lists/tinyatlas_hs_cell_cycle_genes_mod.csv")
+seu_tmp <- CellCycleScoring(seu_tmp, 
+                            s.features = cell_cycle$name[cell_cycle$phase == "S"], 
+                            g2m.features = cell_cycle$name[cell_cycle$phase == "G2/M"],
+                            set.ident = FALSE)
+
+## Save/read object
+#saveRDS(seu_tmp, file = "tmp_seu_merged_with_dup.rds")
+#seu_tmp <- readRDS("tmp_seu_merged_with_dup.rds")
+
+## Get metadata
+seu_tmp_md <- seu_tmp@meta.data
+
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, paged.print=FALSE, fig.width=8, fig.height=12}
+## cluster dimplot
+pdp1 <- DimPlot(seu_tmp, label = TRUE,
+                group.by = "merged_cluster_res0.5") + 
+  labs(title = "Naive clustering of merged data", 
+       subtitle = paste0("(Number of PCs = ", npc, ", resolution = ", res, ")"))
+## sample dimplot
+pdp2 <- DimPlot_scCustom(seu_tmp, 
+                         group.by = "sample_id") + 
+  labs(title = "Individual samples")
+## nfeat 
+pfp1 <- FeaturePlot_scCustom(seu_tmp, alpha_exp = 0.75,
+                             features = c("nFeature_RNA")) + 
+  labs(title = "Number of detected genes")
+## cell cycle
+pfp2 <- DimPlot(seu_tmp, label = FALSE,
+                group.by = "Phase") + 
+  labs(title = "Cell cycle phase")
+## DoubletFinder
+pdp3 <- DimPlot_scCustom(seu_tmp, 
+                         group.by = "DoubletFinder.HC.class", 
+                         colors_use = mypal_brbb[c(6,1)]) + 
+  labs(title = "DoubletFinder Results")
+pdp4 <- DimPlot_scCustom(seu_tmp, 
+                         group.by = "scDblFinder.class", 
+                         colors_use = mypal_brbb[c(6,1)]) + 
+  labs(title = "scDblFinder Results")
+pdp5 <- DimPlot_scCustom(seu_tmp, 
+                         group.by = "Scrublet.class", 
+                         colors_use = mypal_brbb[c(6,1)]) + 
+  labs(title = "Scrublet Results")
+pdp6 <- DimPlot_scCustom(seu_tmp, 
+                         group.by = "doublet_consensus", 
+                         colors_use = mypal_brbb[c(6,1)]) + 
+  labs(title = "Consensus between any 2 out of 3 methods")
+
+(pdp1 + pdp2) / (pfp1 | pfp2) / (pdp6 + pdp3) / (pdp4 + pdp5)
+
+```
+
+QC metrics of initially merged dataset:
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, paged.print=FALSE, fig.width=9, fig.height=5}
+## Set QC metrics
+qc_metrics <- colnames(seu_tmp@meta.data)[c(3,7,8,9,11,12)]
+## Plot QC metrics on UMAP
+FeaturePlot_scCustom(seu_tmp, features = qc_metrics, num_columns = 3)
+
+```
+
+
+Consensus between different doublet detection methods - how many cells 
+considered as doublets are overlapped?
+
+```{r echo=FALSE, warning=FALSE}
+ftable(Scrublet=seu_tmp_md$Scrublet.class,
+       scDblFinder=seu_tmp_md$scDblFinder.class, 
+       DoubletFinder=seu_tmp_md$DoubletFinder.HC.class)
+
+```
+
+Since we have enough cells, let's discard **all barcodes** considered as doublet 
+by any method.
+
+Additionally, we employ a filtering criterion based on the number 
+of reads per gene (*nCount_RNA* should be less than 15000) to mitigate 
+the potential presence of putative doublets in the dataset. Additionally, 
+we will filter out all CD45+ cells located within non-leikosyte superclusters 
+(endothelial and smooth muscle cells).
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, paged.print=FALSE, fig.width=8, fig.height=2.5}
+# set nCount_RNA thresholds
+#th_ncl <- 800
+th_nch <- 15000
+#sel_nc <- c(seu_tmp$nCount_RNA >= th_nch | seu_tmp$nCount_RNA <= th_ncl)
+sel_nc <- c(seu_tmp$nCount_RNA < th_nch)
+nctab <- table(sel_nc)
+((RidgePlot(seu_tmp, features = "nCount_RNA", group.by = "sample_id") + 
+  NoLegend() + 
+  geom_vline(xintercept = th_nch, col = "red") + 
+    #geom_vline(xintercept = th_ncl, col = "red") + 
+  scale_y_discrete(limits = rev) + 
+  labs(title = "Number of reads per gene", y = NULL)) |  
+  FeaturePlot_scCustom(seu_tmp, features = "nCount_RNA", )) |  
+  ((DimPlot(seu_tmp, sizes.highlight  = 0.05, cols.highlight = mypal_brs1[1], 
+           cells.highlight = Cells(seu_tmp)[which(seu_tmp$nCount_RNA >= th_nch)]) + 
+     labs(title = paste0("nCount_RNA >", th_nch),
+          subtitle = paste0("N cells = ", sum((seu_tmp$nCount_RNA >= th_nch)))) + 
+     NoLegend()))
+
+```
+
+Number of cells with gene counts outside the thresholds 
+(nCount_RNA > `th_nch`) in total and by library (sample):
+
+```{r echo=FALSE}
+cat("Total number of cells with gene counts >", th_nch, "\n")
+table(!sel_nc)
+cat("\n\nNumber of cells with gene counts >", th_nch, "by sample \n")
+table(seu_tmp$sample_id, !sel_nc)
+
+```
+
+To have more cues about cell types in detected clusters in initially merged dataset, 
+we will use a pre-defined list of markers for anticipated cell types:
+
+```{r echo=FALSE, fig.height=10, fig.width=8, message=FALSE, warning=FALSE}
+DefaultAssay(seu_tmp) <- "RNA"
+marker_genes <- c("ACTA2", "MYH11", "TAGLN", 
+                  "RGS5", "ATF3", "BCAM", 
+                  "FN1", "VCAN", "LTBP2", 
+                  "LUM", "DCN", "FBLN1",
+                  "SOX9", "RUNX2", "SPP1", 
+                  "SOST", "DLX5", 
+                  "CDH5", "PECAM1", 
+                  "PTPRC", "CD3D", "CD74", "CD19", "CD68")
+FeaturePlot_scCustom(seu_tmp, features = marker_genes, num_columns = 4)
+
+```
+
+We suggest the following **main cell types**
+
+| Cell type                         | Cluster                    |
+| --------------------------------- | -------------------------- |
+| CD45+ cells (leukocytes)          | 0,1,2,6,8,9,14,19,20,21,24 |
+| Endothelial cells                 | 4,10,11,23                 |
+| Smooth muscle cells + Fibroblasts | 3,5,7,12,13,15,16,17,18,22 |
+
+Detected CD45+ cells in non-leukocytes clusters:
+
+```{r echo=FALSE}
+sel_cd45ec <- (seu_tmp_md$seurat_clusters %in% c(4,10,11,23)) & (seu_tmp_md$percent_cd45 > 0)
+sel_cd45smc <- (seu_tmp_md$seurat_clusters %in% c(3,5,7,12,13,15,16,17,18,22)) & (seu_tmp_md$percent_cd45 > 0)
+cat("Number of CD45+ cells in endothelial clusters (EC): ")
+table(ifelse(sel_cd45ec[seu_tmp_md$seurat_clusters %in% c(4,10,11,23)], "CD45+EC", "CD45-EC"))
+  cat("\nNumber of CD45+ cells in smooth muscle clusters (SMC): ")
+table(ifelse(sel_cd45smc[seu_tmp_md$seurat_clusters %in% c(3,5,7,12,13,15,16,17,18,22)], "CD45+SMC", "CD45-SMC"))
+
+```
+
+The number of detected genes in these cells
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, paged.print=FALSE, fig.width=6, fig.height=5}
+ptmp1 <- seu_tmp_md %>% 
+  ggplot(aes(x = ifelse(sel_cd45ec, "CD45+", "CD45-"), nFeature_RNA, 
+             fill = ifelse(sel_cd45ec, "CD45+", "CD45-"))) + 
+  geom_violin() + 
+  geom_jitter(width = 0.15, shape = ".", size = 0.1, alpha = 0.5) + 
+  geom_boxplot(width = 0.2, colour = "white", outlier.colour = NA, alpha = 0.5) + 
+  labs(title = "nFeatures in cells with EC markers", x = NULL, y = NULL) + 
+  theme_classic(base_size = 16) + 
+  theme(legend.position = "none")
+ptmp2 <- seu_tmp_md %>% 
+  ggplot(aes(x = ifelse(sel_cd45smc, "CD45+", "CD45-"), nFeature_RNA, 
+             fill = ifelse(sel_cd45smc, "CD45+", "CD45-"))) + 
+  geom_violin() + 
+  geom_jitter(width = 0.15, shape = ".", size = 0.1, alpha = 0.5) + 
+  geom_boxplot(width = 0.2, colour = "white", outlier.colour = NA, alpha = 0.5) + 
+  labs(title = "nFeatures in cells with VSMCs markers", x = NULL, y = NULL) + 
+  theme_classic(base_size = 16) + 
+  theme(legend.position = "none")
+(DimPlot(seu_tmp, sizes.highlight = 0.01,
+         cells.highlight = Cells(seu_tmp)[which(sel_cd45ec)]) + 
+    NoLegend() + ggtitle("Cells with EC markers and CD45+")) + 
+(DimPlot(seu_tmp, sizes.highlight = 0.01,
+         cells.highlight = Cells(seu_tmp)[which(sel_cd45smc)]) + 
+    NoLegend() + ggtitle("Cells with VSMC markers and CD45+")) + 
+ptmp1 + ptmp2
+
+```
+
+The number of detected genes in these suspicious cell groups is higher 
+which may indicate the higher probability these "cells" are doublets that
+are not detected by either tool used for this purpose.
+
+Thus, if assuming that transition of VSMC and EC to CD45+ myeloid cell 
+is not possible (but we cannot say the same about the reverse transition),
+we may estimate the observed rate of heterotypic leukocyte-derived doublets 
+is about 3-4%.
+
+Let's estimate the number of cells passing all filters.
+
+```{r echo=FALSE}
+## Filter out doublets, cells with high total counts, and CD45+ non-leukocytes
+filt <- c(seu_tmp$Scrublet.class == "Doublet" | 
+            seu_tmp$scDblFinder.class == "Doublet" | 
+            seu_tmp$DoubletFinder.HC.class == "Doublet" | 
+            !sel_nc | sel_cd45ec | sel_cd45smc)
+seu_nodup <- seu_tmp[, which(!filt)]
+cat("Total number of cells passed after doublet detection and 'gene counts' cutoff:")
+table(ifelse(!filt, "Passed", "Discarded"))
+cat("\nNumber of cells in every samples passed after doublet detection and 'gene counts' cutoff:")
+table(seu_tmp$sample_id, ifelse(!filt, "Passed", "Discarded"))
+
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, paged.print=FALSE, fig.width=8, fig.height=2.5}
+pdp2 + (pdp1 + NoLegend()) + 
+  (DimPlot(seu_tmp, sizes.highlight = 0.01,
+          cells.highlight = Cells(seu_tmp)[which(filt)]) + 
+     NoLegend() + ggtitle("Discarded cells (red)"))
+
+```
+
+Since the priority of this study is plaque cells, we will also remove the samples 
+of proximal adjacent tissue (PA samples: GSM4837524, GSM4837526, GSM4837528) 
+from Alsaigh et al. dataset which seem to have some fraction of adventitial cells.
+
+## Data normalisation and clustering {#dataset1}
+
+Let's proceed to normalize the remaining samples utilizing standard 
+**LogNorm workflow** in Seurat and then integrate them using 
+[**Harmony**](https://www.nature.com/articles/s41592-019-0619-0).
+
+```{r include=FALSE}
+
+## set some parameters
+nf = 2000
+kanc = 5
+npc = 30
+npcu = 16
+res = 1
+
+## prepare data
+seu_nodup_list <- SplitObject(seu_nodup, split.by = "geo_id")
+## remove proximal adjacent (PA) tissue samples from Alsaigh dataset
+seu_nodup_list <- seu_nodup_list[-which(names(seu_nodup_list) %in% sample_info$sample_id[sample_info$grpoup_short == "CAAT"])]
+
+### LogNorm method
+## the globals to 4 GB
+# options(future.globals.maxSize = 4*1024^3)
+# seu_nodup_list <- map(seu_nodup_list, ~ {
+#   NormalizeData(.x,) %>%
+#     FindVariableFeatures(selection.method = "vst", nfeatures = nf)
+#  })
+# seu_features <- SelectIntegrationFeatures(object.list = seu_nodup_list, nfeatures = nf)
+# # do data integration via RPCA
+# seu_anchors <- FindIntegrationAnchors(object.list = seu_nodup_list,
+#                                      anchor.features = seu_features,
+#                                      reduction = "rpca",
+#                                      dims = 1:npc, k.anchor = kanc,
+#                                      verbose = FALSE)
+# seu_comb <- IntegrateData(anchorset = seu_anchors, dims = 1:npc, verbose = FALSE)
+# DefaultAssay(seu_comb) <- "integrated"
+# seu_comb <- ScaleData(seu_comb, verbose = FALSE,
+#                       vars.to.regress = c("percent_malat1", "percent_mito"))
+
+## SCT method
+# prepare data
+# seu_nodup_list <- map(seu_nodup_list, ~ {
+#  SCTransform(.x, vst.flavor = "v2", verbose = TRUE, 
+#              vars.to.regress = c("percent_mito")
+#              ) %>%
+#    RunPCA(npcs = npc, verbose = TRUE)
+#  })
+# seu_features <- SelectIntegrationFeatures(object.list = seu_nodup_list, nfeatures = nf)
+# seu_nodup_list <- PrepSCTIntegration(object.list = seu_nodup_list, anchor.features = seu_features)
+# # do data integration via RPCA
+# seu_anchors <- FindIntegrationAnchors(object.list = seu_nodup_list,
+#                                      normalization.method = "SCT",
+#                                      anchor.features = seu_features,
+#                                      reduction = "rpca", dims = 1:npc,
+#                                      k.anchor = kanc)
+# seu_comb <- IntegrateData(anchorset = seu_anchors,
+#                          normalization.method = "SCT",
+#                          dims = 1:npc)
+#DefaultAssay(seu_comb) <- "integrated"
+
+### Harmony
+#library(harmony)
+
+### Harmony + SCT
+## set some parameters
+# nf = 3000
+# kanc = 5
+# npc = 50
+# npcu = 40
+# res = 0.3
+# ## prepare data
+# seu_nodup_list <- map(seu_nodup_list, ~ {
+#  SCTransform(.x, vst.flavor = "v2", verbose = FALSE,
+#              method = "glmGamPoi",
+#              return.only.var.genes = FALSE,
+#              vars.to.regress = c("percent_mito"))
+#  })
+# seu_features <- SelectIntegrationFeatures(object.list = seu_nodup_list, nfeatures = nf)
+# seu_comb <- merge(x = seu_nodup_list[[1]],
+#                   y = seu_nodup_list[2:length(seu_nodup_list)],
+#                   merge.data = TRUE)
+# VariableFeatures(seu_comb) <- seu_features
+# seu_comb <- RunPCA(seu_comb, npcs = npc, verbose = FALSE)
+# seu_comb <- RunHarmony(seu_comb, assay.use = "SCT",
+#                        group.by.vars = "geo_id",
+#                        reduction.use = "pca")
+# seu_comb <- RunUMAP(seu_comb, reduction = "harmony", assay = "SCT", dims = 1:npcu)
+
+## Harmony + LogNorm
+## Merge dataset
+library(harmony)
+seu_comb <- merge(x = seu_nodup_list[[1]],
+                  y = seu_nodup_list[2:length(seu_nodup_list)],
+                  merge.data = TRUE)
+## Process dataset
+seu_comb <- seu_comb %>%
+  NormalizeData(verbose = FALSE) %>%
+    FindVariableFeatures(selection.method = "vst", nfeatures = nf) %>%
+    ScaleData(verbose = FALSE, 
+              vars.to.regress = c("percent_mito")) %>%
+              #vars.to.regress = c("percent_mito", "percent_malat1")) %>%
+    RunPCA(npcs = npc, verbose = FALSE)
+seu_comb <- RunHarmony(seu_comb,
+                       group.by.vars = "geo_id",
+                       plot_convergence = FALSE)
+seu_comb <- RunUMAP(seu_comb, reduction = "harmony", dims = 1:npcu, seed.use = 1)
+seu_comb <- FindNeighbors(object = seu_comb, dims = 1:npcu, reduction = "harmony")
+seu_comb <- FindClusters(seu_comb, resolution = (res/2))
+seu_comb <- FindClusters(seu_comb, resolution = res)
+
+## Run standard processing
+# #seu_comb <- ScaleData(seu_comb, verbose = FALSE)
+# seu_comb <- RunPCA(seu_comb, npcs = npc, verbose = TRUE)
+# #ElbowPlot(seu_comb, ndims = npc)
+# ## add UMAP
+# DefaultAssay(seu_comb) <- "integrated"
+# seu_comb <- RunUMAP(seu_comb, reduction = "pca", 
+#                     dims = 1:npcu, verbose = TRUE)
+# ## find clusters
+# seu_comb <- FindNeighbors(seu_comb, dims = 1:npcu, verbose = TRUE)
+# seu_comb <- FindClusters(seu_comb, resolution = res, verbose = TRUE)
+# ## save results
+#save(seu_comb, seu_tmp, sample_info, file = "tmp1.RData")
+
+## Make some plots
+seu_comb$cluster_id <- factor(
+  paste0("C", seu_comb$seurat_clusters), 
+  levels = paste0("C", levels(seu_comb$seurat_clusters))
+  )
+dpd1 <- DimPlot(seu_comb, label = T) + NoLegend()
+dpd2 <- DimPlot(seu_comb, group.by = "cluster_id",
+                label = T, label.box = TRUE, repel = TRUE) + NoLegend()
+
+## Save Seurat object as RDS file
+#saveRDS(seu_comb, file = "seu_comb.rds")
+## Load Seurat object as RDS file
+#seu_comb <- readRDS("seu_comb.rds") 
+
+
+```
+
+
+Cell clusters:
+
+```{r echo=FALSE, fig.height=5, fig.width=7, message=FALSE, warning=FALSE}
+qc_metrics <- colnames(seu_comb@meta.data)[c(2,3,7,8,9,12)]
+# Visualization
+p1 <- DimPlot_scCustom(seu_comb, reduction = "umap", group.by = "orig.ident") + 
+  labs(title = "Samples (libraries)")
+p2 <- DimPlot(seu_comb, reduction = "umap", group.by = "merged_cluster_res0.5", 
+              label = TRUE) + 
+  labs(title = "Cell clusters identified after merging (resolution=0.5)")
+p3 <- DimPlot(seu_comb, reduction = "umap", group.by = "seurat_clusters", 
+              label = TRUE, repel = FALSE) + 
+  labs(title = paste0("Cell clusters after integration (resolution=", res,")"))
+p4 <- DimPlot(seu_comb, reduction = "umap", group.by = "Phase") + 
+  labs(title = "Cell cycle phase")
+(p3 + p4) / (p1 + p2)
+
+```
+
+QC Metrics
+
+```{r echo=FALSE, fig.height=6, fig.width=8, message=FALSE, warning=FALSE}
+qc_metrics <- colnames(seu_comb@meta.data)[c(2,3,7,8,9,11,12,32)]
+FeaturePlot_scCustom(seu_comb, features = qc_metrics, num_columns = 3) + 
+  (dpd1 + NoLegend())
+
+```
+
+Cell clusters dendrogram:
+
+```{r echo=FALSE, fig.height=2.5, fig.width=6, message=FALSE, warning=FALSE}
+# Visualization
+seu_comb <- FindVariableFeatures(seu_comb, assay = "RNA", 
+                                 nfeatures = 2000, verbose = FALSE)
+seu_comb <- BuildClusterTree(seu_comb, assay = "RNA", 
+                             dims = 1:npcu, verbose = FALSE)
+PlotClusterTree(seu_comb)
+
+```
+
+Cell clusters by source:
+
+```{r echo=FALSE, fig.height=6, fig.width=9, message=FALSE, warning=FALSE}
+# Visualization
+p4 <- DimPlot(seu_comb, reduction = "umap", group.by = "seurat_clusters", 
+              split.by = "dataset_name", label = TRUE) + 
+  labs(title = "Cell clusters after integration (split by group)")
+p5 <- DimPlot(seu_comb, reduction = "umap", group.by = "Phase", 
+              split.by = "dataset_name") + 
+  labs(title = "Cell cycle phase (split by group)")
+p4 / p5
+
+```
+
+## Cluster annotation
+
+First look how are expressed some pre-selected marker genes specific 
+for atherosclerotic arteries
+
+```{r echo=FALSE, fig.height=8, fig.width=10, message=FALSE, warning=FALSE}
+DefaultAssay(seu_comb) <- "RNA"
+marker_genes <- c("ACTA2", "MYH11", "TAGLN", # contractile SMC
+                  "RGS5", # perycite-like
+                  "FN1", "VCAN", "LTBP2", # fibromyocytes
+                  "LUM", "DCN", "FBLN1", # fibroblasts
+                  "SOX9", "RUNX2", "SPP1", # osteochondrogenic
+                  "SOST", "DLX5", # anti-osteogenic?
+                  "CDH5", "PECAM1", # endothelial
+                  "MKI67", # proliferative
+                  "PTPRC", # leukocyte
+                  "CD68", # macrophage
+                  "CD3D", "CD40LG", "GZMB", "CD19")
+FeaturePlot_scCustom(seu_comb, features = marker_genes, num_columns = 5) + 
+  (dpd1 + NoLegend())
+
+```
+
+Top markers (up-regulated genes) for cell clusters
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+#saveRDS(seu_comb, file = "seu_comb.rds")
+#seu_comb <- readRDS("seu_comb.rds")
+DefaultAssay(seu_comb) <- "RNA"
+Idents(seu_comb) <- "seurat_clusters"
+## Find cluster markers
+seu_markers <- list()
+# Wilcox test
+seu_markers$wilcox <- FindAllMarkers(seu_comb, assay = "RNA", 
+                              max.cells.per.ident = 800,
+                              #latent.vars = "group",
+                              test.use = "wilcox") %>% 
+  rownames_to_column(var = "Gene")
+# LR
+seu_markers$lr <- FindAllMarkers(seu_comb, assay = "RNA", 
+                              max.cells.per.ident = 800,
+                              #latent.vars = "group",
+                              test.use = "LR") %>% 
+  rownames_to_column(var = "Gene")
+# MAST
+seu_markers$mast <- FindAllMarkers(seu_comb, assay = "RNA", 
+                              max.cells.per.ident = 800,
+                              #latent.vars = "group",
+                              test.use = "MAST") %>% 
+  rownames_to_column(var = "Gene")
+writexl::write_xlsx(seu_markers, path = "athero_comb_cluster_markers_res1.xlsx")
+
+```
+
+The expression of cluster-specific marker genes (top 10 for each cluster) 
+identified by [MAST method](https://doi.org/10.1186/s13059-015-0844-5).
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+seu_markers_mast <- readxl::read_xlsx(path = "athero_comb_cluster_markers_res1.xlsx", sheet = 3)
+#seu_markers_mast <- seu_markers$mast
+top10_markers <- seu_markers_mast %>% 
+  filter(p_val_adj < 0.05) %>% 
+  arrange(-avg_log2FC, cluster) %>% 
+  mutate(cluster_id = factor(paste0("C", cluster), 
+                             levels = levels(seu_comb$cluster_id))) %>% 
+  dplyr::select(cluster, cluster_id, gene, avg_log2FC, 
+                pct.1, pct.2, p_val, p_val_adj) %>% 
+  slice_head(n = 10, by = cluster_id) %>% 
+  arrange(cluster)
+
+top10_markers %>% 
+  select(-cluster)
+
+```
+
+Top 5 marker genes:
+
+```{r echo=FALSE, fig.height=12, fig.width=5, message=FALSE, warning=FALSE}
+
+top5_markers <- top10_markers %>% 
+  arrange(cluster_id) %>% 
+  distinct(gene, .keep_all = TRUE) %>% 
+  group_by(cluster_id) %>% 
+  slice_head(n = 5) %>% 
+  pull(gene)
+mypal <- rev(brewer.pal(9, "RdBu"))
+DotPlot(seu_comb, assay = "RNA", 
+        group.by = "cluster_id", 
+        features = rev(top5_markers), 
+        cols = c("grey", "red")) + 
+  coord_flip() + 
+  scale_y_discrete(position = "right") + 
+  #scale_x_reverse() + 
+  theme_bw() + 
+  theme(legend.position = "top") + 
+  labs(y = "Cell cluster", x = NULL) & 
+  scale_colour_gradientn(colours = mypal, limits = c(-2.5,2.5), oob = scales::squish)
+  #scale_colour_gradientn(colours=c("blue","violet","red"))
+  #scale_color_gradient2(low = mypal[2], high =  mypal[8])  
+
+```
+
+Automatic cell type annotation using 
+
+- [*SingleR*](https://bioconductor.org/packages/release/bioc/html/SingleR.html) 
+R package and human RNA-seq reference via 
+[*celldex*](http://bioconductor.org/packages/release/data/experiment/html/celldex.html) 
+package.
+
+
+```{r include=FALSE}
+### Automatic annotation using SingleR with celldex human reference
+library(SingleR)
+library(celldex)
+## Get reference datasets
+hpca_ref <- readRDS("/faststorage/project/THOR/databases/celldex_annotation_db/HumanPrimaryCellAtlasData.rds")
+## Do annotation
+tmp_singler <- SingleR(test = seu_comb@assays$RNA@data, assay.type.test = 1,
+                       ref = hpca_ref, labels = hpca_ref$label.main)
+seu_comb$singler_pred <- tmp_singler$labels
+
+```
+
+```{r echo=FALSE, fig.height=4, fig.width=9, message=FALSE, warning=FALSE}
+# Visualization
+DimPlot(seu_comb, reduction = "umap", group.by = "singler_pred",
+        label = TRUE, repel = TRUE) + 
+  theme(legend.position = "bottom") + 
+  labs(title = "SingleR predicted cell types (celldex human reference)") + 
+  (DimPlot(seu_comb, reduction = "umap", group.by = "cluster_id", 
+              label = TRUE, repel = TRUE, label.box = TRUE) + 
+  NoLegend() + 
+  labs(title = "Cell clusters"))
+
+knitr::kable(table(seu_comb$singler_pred, seu_comb$cluster_id))
+
+```
+
+
+```{r include=FALSE}
+
+### Automatic annotation using popV with Tabula sapiens "Vasculature" dataset as reference
+# Convert Seurat object to AnnData and save
+sceasy::convertFormat(seu_comb, from = "seurat", to = "anndata",
+                      outFile = "sc_athero_comb.h5ad")
+# Run python script for annotation with popV pipeline ("1.2_athero-scrnaseq-annotation.ipynb")
+# Add to metadata annotation generated by the pipeline
+ts_anno <- read.csv("annotated_query.csv", row.names = 1)
+seu_comb <- AddMetaData(seu_comb, metadata = ts_anno[, 21:28])
+# Save annotated object
+saveRDS(seu_comb, file = "seu_comb.rds")
+
+```
+
+```{r echo=FALSE, fig.height=4, fig.width=9, message=FALSE, warning=FALSE}
+#seu_comb <- readRDS(file = "seu_comb.rds")
+seu_comb$ts_vasc_predicted.id <- seu_comb$consensus_prediction
+# Visualization
+DimPlot(seu_comb, reduction = "umap", group.by = "ts_vasc_predicted.id",
+        label = TRUE, repel = TRUE) + 
+  theme(legend.position = "bottom") + 
+  labs(title = "Tabula sapiens - Vasculature predicted cell types") + 
+  (DimPlot(seu_comb, reduction = "umap", group.by = "cluster_id", 
+              label = TRUE, repel = TRUE, label.box = TRUE) + 
+  NoLegend() + 
+  labs(title = "Cell clusters"))
+
+knitr::kable(table(seu_comb$ts_vasc_predicted.id, seu_comb$cluster_id))
+
+```
+
+Main **immune cell type** gene signatures from 
+[Zernecke A. et al, 2023](https://doi.org/10.1093/cvr/cvac161)
+
+```{r include=FALSE}
+## Gene signatures
+library(UCell)
+mygs <- list(
+  "Macrophages" = c("CD68", "C1QA", "C5AR1"),
+  "Human_Inflammatory_Macrophages" = c("CD74", "HLA-DRB1"),
+  "Human_Foamy_Macrophages" = c("APOC1", "APOE", "FABP5", "FABP4"),
+  "Human_LYVE1_Macrophages" = c("LYVE1", "LGMN", "MARCO"),
+  "Human_C3_Macrophages" = c("C3", "JUN", "CCL4"),
+  "Human_IFNIC_Macrophages" = c("ISG15", "IFI6", "MX1"),
+  "Monocytes" = c("VCAN", "CD52", "S100A8", "S100A9", "LYZ"),
+  "Proliferating_cells" = c("TUBB", "H2AFZ", "STMN1"),
+  "B_cells" = c("MZB1", "JCHAIN"),
+  "hcDC1" = c("CLEC9A", "IRF8", "IDO1"),
+  "hcDC2" = c("CLEC10A", "FCER1A", "CD1C")
+)
+seu_comb <- AddModuleScore_UCell(seu_comb, 
+                                 features = mygs, 
+                                 name = NULL)
+
+
+```
+
+```{r echo=FALSE, fig.height=5, fig.width=9, message=FALSE, warning=FALSE}
+FeaturePlot_scCustom(seu_comb, features = names(mygs), num_columns = 4) + dpd1
+
+```
+
+Some gene markers of lipid uptake and **foam cells** 
+
+```{r echo=FALSE, fig.height=5, fig.width=9, message=FALSE, warning=FALSE}
+mygenes <- c("APOE", "CD36", "FABP4", "FABP5", 
+             "MSR1", "OLR1", "ABCA1", "ABCG1",
+             "NR1H3", "ACAT1", "MMP2", "MMP9")
+FeaturePlot_scCustom(seu_comb, features = mygenes, num_columns = 4)
+
+```
+
+Clusters C7 (macrophages) and C11 (SMCs) have APOE, CD36, FABP4, FABP5 
+highly co-expressed which are related to lipid uptake and storage, and 
+may point to a possible "fomay" state of these cells.
+
+Components of **complement system**
+
+```{r echo=FALSE, fig.height=10, fig.width=9, message=FALSE, warning=FALSE}
+mygenes <- c("C1QA", "C1QB", "C1QC", "C1R", "C1S", "C2", "C3", "C4A", "C4B", "C5", "C6", "C7", "C8A", "C8B", "C8G", "C9", "CFB", "CFH", "CFI", "CFHR1", "CFHR2", "CFHR3", "CFHR4", "CFHR5", "CFP", "CD46", "CD55", "CD59")
+mygenes <- mygenes[mygenes %in% rownames(seu_comb)]
+FeaturePlot_scCustom(seu_comb, features = mygenes, num_columns = 4)
+
+```
+
+Some markers of **osteoblasts**
+
+```{r echo=FALSE, fig.height=5, fig.width=9, message=FALSE, warning=FALSE}
+mygenes <- c("COL1A1", "COL1A2", "COL5A2", "PCOLCE", 
+             "IBSP", "FKBP10", "SPARC", "BGN", 
+             "RCN3", "SERPINF1", "SERPINH1")
+mygenes <- mygenes[mygenes %in% rownames(seu_comb)]
+FeaturePlot_scCustom(seu_comb, features = mygenes, num_columns = 4) + dpd1
+
+```
+
+```{r include=FALSE}
+## Manually annotate cell clusters
+seu_comb$cell_type = seu_comb$cell_type_short = 
+  seu_comb$cell_subtype = seu_comb$cell_subtype_short <- seu_comb$cluster_id
+levels(seu_comb$cell_type) <- c(
+  "T cell", "T cell", "Smooth muscle cell", "Endothelial cell", "Macrophage", 
+  "Smooth muscle cell", "T cell", "Macrophage", "B cell", "T cell", "Monocyte", 
+  "Smooth muscle cell", "Smooth muscle cell", "Fibroblast", "Mast cell", 
+  "Smooth muscle cell", "Macrophage", "Dendritic cell", "Fibroblast/Mixed", 
+  "Neuron", "Proliferating immune cells", "Smooth muscle cell", 
+  "Endothelial cell", "Plasma cells"
+  )
+levels(seu_comb$cell_type_short) <- c(
+  "TC", "TC", "SMC", "EC", "MPh", "SMC", "TC", "MPh", "BC", "TC", "Mon", 
+  "SMC", "SMC", "FB", "MC", "SMC", "MPh", "DC", "UMC", "NC", "PIC", 
+  "SMC", "EC", "PC"
+  )
+levels(seu_comb$cell_subtype) <- c(
+"T cell (Cytotoxic)", "T cell (Activated)", "SMC (Contractile)", 
+"Endothelial cell (C4)", "Macrophage (Inflammatory)", "SMC (Fibromyocyte C5)", 
+"T cell (Memory)", "Macrophage (Foamy)", "B cell", "T cell (T/NK cell)", 
+"Monocyte", "SMC (Foamy)", "SMC (Fibromyocyte C12)", "Fibroblast", "Mast cell", 
+"SMC (Osteochondrogenic)", "Macrophage (C16)", "Dendritic cell", 
+"Fibroblast/Mixed (C18)", "Neuron", "Proliferating immune cell", 
+"SMC (Undefined C21)", "Endothelial cell (C22)", "Plasma cell"
+)
+levels(seu_comb$cell_subtype_short) <- c(
+"CTL", "ATL", "SMC-C", "EC1", "MPh-I", "FMC2", "MTL", "MPh-F", "BC", "NKT", 
+"Mon", "SMC-F", "FMC1", "FB", "MC", "SMC-OCL", "MPh", "MDC", "UMC", "NC", 
+"PIC", "SMC-UM", "EC2", "PC"
+)
+seu_comb$new_annotation <- seu_comb$cell_subtype %>% 
+  str_replace_all("^SMC \\(", "SMC-SC (") %>% 
+  str_replace_all("^T cell .+", "T cell") %>% 
+  str_replace_all("^Endothelial cell .+", "Endothelial cell") %>% 
+  str_replace_all("^Macrophage .+", "Macrophage") %>% 
+  str_replace_all("\\(Fibromyocyte.+\\)", "(Fibromyocyte)") %>% 
+  str_replace_all("^Fibroblast$", "SMC-SC (Fibroblast)")
+
+```
+
+```{r echo=FALSE, fig.height=6, fig.width=9, message=FALSE, warning=FALSE}
+dpd_fin <- 
+(DimPlot(seu_comb, reduction = "umap", group.by = "cell_type_short", 
+         label = TRUE, repel = TRUE, label.box = TRUE) + NoLegend() + 
+    labs(title = "Manually annotated cell types (short)")) + 
+  (DimPlot(seu_comb, reduction = "umap", group.by = "cell_type",
+           label = TRUE, repel = TRUE) + 
+     theme(legend.position = "right") + 
+     labs(title = "Manually annotated cell types")) + 
+  (DimPlot(seu_comb, reduction = "umap", group.by = "cell_subtype_short", 
+           label = TRUE, repel = TRUE, label.box = TRUE) + NoLegend() + 
+     labs(title = "Manually annotated cell subtypes (short)")) + 
+  (DimPlot(seu_comb, reduction = "umap", group.by = "cell_subtype",
+           label = TRUE, repel = TRUE) + 
+     theme(legend.position = "right") + 
+     labs(title = "Manually annotated cell subtypes"))
+ggsave(dpd_fin, filename = "athero2_umap_annotated.pdf", 
+       width = 18, height = 12)
+dpd_fin
+
+```
+
+**Cell numbers in manually annotated cell types and subtypes**
+
+```{r echo=FALSE, fig.height=3, fig.width=7, message=FALSE, warning=FALSE}
+seu_comb_md <- seu_comb@meta.data
+q1 <- seu_comb_md %>% 
+  count(sample_id, cell_type) %>% 
+  ggplot(aes(x = sample_id, y = n * 100, fill = cell_type)) + 
+  geom_bar(position = "fill", stat = "identity", color = "white") + 
+  theme_bw() + 
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) + 
+  labs(title = "Identified cell types in libraries (samples)",
+       x = NULL, y = "Fraction of the total number of cells")
+q2 <- seu_comb_md %>% 
+  count(sample_id, cell_subtype) %>% 
+  ggplot(aes(x = sample_id, y = n * 100, fill = cell_subtype)) + 
+  geom_bar(position = "fill", stat = "identity", color = "white") + 
+  theme_bw() + 
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) + 
+  labs(title = "Identified cell subtypes in libraries (samples)",
+       x = NULL, y = "Fraction of the total number of cells")
+q1 + q2
+
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+knitr::kable(table(seu_comb$sample_id, seu_comb$cell_type))
+knitr::kable(table(seu_comb$sample_id, seu_comb$cell_subtype))
+
+```
+
+# THOR target genes
+
+How are **THOR genes** expressed in cell clusters?
+
+```{r include=FALSE}
+## load THOR genes
+thor_list <- read.delim("/faststorage/project/THOR/anton/sc_athero/THOR_Prioritised_Consensus_Summary_Table.txt")
+thor_kd_genes <- read.delim("/faststorage/project/THOR/anton/sc_athero/THOR_Knockdown_Genes_R1-2.tsv")
+```
+
+
+```{r fig.height=3, fig.width=6, message=FALSE, warning=FALSE}
+seu_comb$new_annotation <- seu_comb$cell_subtype %>% 
+  str_replace_all("^SMC \\(", "SMC-SC (") %>% 
+  str_replace_all("^T cell .+", "T cell") %>% 
+  str_replace_all("^Endothelial cell .+", "Endothelial cell") %>% 
+  str_replace_all("^Macrophage .+", "Macrophage") %>% 
+  str_replace_all("\\(Fibromyocyte.+\\)", "(Fibromyocyte)") %>% 
+  str_replace_all("^Fibroblast$", "SMC-SC (Fibroblast)") %>% 
+  factor(.)
+thor_kd_genes <- read.delim("/faststorage/project/THOR/anton/sc_athero/THOR_Knockdown_Genes_R1-2.tsv")
+sel_seu <- seu_comb
+brpal_rb <- rev(brewer.pal(n = 9, name = 'RdBu'))
+thor_shared <- thor_kd_genes$gene_name[thor_kd_genes$gene_name %in% row.names(sel_seu)]
+pdp <- DotPlot(sel_seu, group.by = "new_annotation", 
+               cluster.idents = FALSE, 
+               scale = TRUE, 
+               #scale = FALSE,
+               features = sort(thor_kd_genes$gene_name),
+               cols = c("lightgrey", brpal_s1[1])
+) + 
+  #scale_color_vik() + 
+  #scale_colour_gradientn(colours = c("lightgrey", mypal[6:9]), limits = c(0, 4), oob = scales::squish) + 
+  scale_colour_gradientn(colours = brpal_rb, limits = c(-2, 2), oob = scales::squish) + 
+  RotatedAxis() + 
+  labs(title = "THOR KD targets expression", x = NULL, y = NULL)
+pdp$data$id <- factor(pdp$data$id, 
+                      levels = c("Neuron", "Mast cell", "Proliferating immune cell",
+                                 "Plasma cell", "B cell", "T cell", 
+                                 "Dendritic cell", "Monocyte", "Macrophage",
+                                 "Endothelial cell", "Fibroblast/Mixed (C18)",
+                                 "SMC-SC (Fibroblast)", "SMC-SC (Osteochondrogenic)",
+                                 "SMC-SC (Fibromyocyte)", "SMC-SC (Contractile)",
+                                 "SMC-SC (Foamy)", "SMC-SC (Undefined C21)"))
+pdp
+
+```
+
+
+
+# References
+
+This workflow is inspired by several sources:
+
+- "[Best practices for single-cell analysis across modalities](https://doi.org/10.1038/s41576-023-00586-w)" 
+paper by Heumos et al (2023)
+
+- ["Single-cell RNA-seq: Quality Control Analysis"](https://hbctraining.github.io/scRNA-seq_online/lessons/04_SC_quality_control.html), 
+teaching materials at the Harvard Chan Bioinformatics Core
+
+- [Quality Control](https://www.sc-best-practices.org/preprocessing_visualization/quality_control.html) chapter in "Single cell best practices" handbook
+
+- [Single-cell data analysis pipeline](https://cellgeni.readthedocs.io/en/latest/notebooks.html) 
+elaborated by CellGenIT group
+
+
+# R packages used
+
+```{r}
+sessionInfo()
+
+```
+
