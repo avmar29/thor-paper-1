@@ -30,7 +30,6 @@ mypal_rainbow_fun <- colorRampPalette(rev(brewer.pal(11, "Spectral")))
 p_th <- 0.05
 lfc_th <- 0.5
 ## Load gene sets
-thor_list <- read.delim("THOR_Prioritised_Consensus_Summary_Table.txt")
 thor_kd_targets <- read.delim("THOR_Knockdown_Genes_R1-2.tsv")
 
 

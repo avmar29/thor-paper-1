@@ -11,7 +11,11 @@ This repository contains the code and additional files for the THOR project manu
 - *1-3_athero-scrnaseq-annotation.ipynb* - Cell type annotation of scRNA-seq dataset using popV algorithm.
 
 - *2-1_bulk-rnaseq-preprocessing.md* - Markdown file describing preprocessing steps of bulk RNA-seq data on HPC (from FASTQ files to count matrices).
+- *2-2_bulk-rnaseq-analysis.R* - R script file containing the code for bulk RNA-seq data analysis and integration.
 
+- *deg_functions.R* - R script file containing helper functions for bulk RNA-seq data analysis.
+
+- *THOR_Knockdown_Genes_R1-2.tsv* - text fie containing information about THOR target genes.
 
 
 ## Publication
